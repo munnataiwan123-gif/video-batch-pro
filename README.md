@@ -1,102 +1,83 @@
-# Video Batch Pro
+# Digitalinos — Video Batch Pro
 
-A fully-offline, open-source desktop batch video processor — like a simplified Wondershare UniConverter — written in Python + PyQt5. It supports:
+A fully-offline, open-source desktop batch video processor — like a simplified Wondershare UniConverter — written in Python + PyQt5.
 
-- **Batch video upload** (drag-and-drop or file chooser) with per-file duration/resolution/size.
-- **Watermarking**: image logo *or* text overlay, with position / opacity / scale / font-size controls.
-- **AI upscaling** via **Real-ESRGAN** (ncnn-vulkan, runs locally — no API calls). Falls back to FFmpeg Lanczos scaling if Real-ESRGAN is not installed.
-- **Batch processing engine** using FFmpeg with per-file + overall progress bars and cancellation.
-- **Export**: processed videos are written to a chosen folder and can be bundled into a single **ZIP** archive with one click.
-- **Presets**: save/load your favourite settings (e.g. "YouTube watermark", "4K upscale + logo") as JSON.
-- **Clean dark-mode UI** that stays responsive during processing (all work runs on a background thread).
+- **Batch video upload** (drag-and-drop or file chooser) with per-file duration / resolution / size.
+- **Watermarking**: image logo *or* text overlay with drop-shadow, custom font file, opacity / scale / size / position controls. Image watermarks are now **frame-stable** (no bounce).
+- **Quality templates** — *Original*, *YouTube 1080p Clean*, *CapCut Ultra HD (1440p)*, *4K Crisp (2160p)*, *Fast Preview*. Applies Lanczos scale + `unsharp` sharpening for clean, non-blurry output.
+- **AI upscaling** via **Real-ESRGAN** (ncnn-vulkan, local). Falls back to FFmpeg Lanczos if Real-ESRGAN isn't installed.
+- **Sequential export naming** (`01_ab12cd.mp4`, `02_ef34gh.mp4`, …) — ideal for bulk uploads.
+- **Batch engine** using FFmpeg with per-file + overall progress bars and cancellation.
+- **ZIP export** of all processed videos.
+- **Presets** — save / load your favourite settings as JSON.
+- **In-app Help tab** with full step-by-step usage tips.
+- **1-click launcher** on Windows (`launch.bat`) — no terminal required.
 - **Offline-only**: no network calls, no telemetry.
 
 Primary target: **Windows**. Also runs on macOS and Linux.
 
 ---
 
-## Screens
+## Quick Start (Windows — 1-click)
 
+1. Install **Python 3.11** from <https://www.python.org/downloads/windows/> — tick *"Add python.exe to PATH"*.
+2. Install **FFmpeg** (see [FFmpeg setup](#ffmpeg-required) below).
+3. Download the repo (Code → Download ZIP) or `git clone https://github.com/munnataiwan123-gif/video-batch-pro.git`.
+4. **Double-click `launch.bat`**. First run creates the virtual env and installs dependencies automatically (~30s). Subsequent runs launch instantly.
+
+That's it — no terminal, no commands.
+
+On macOS/Linux use `./launch.sh` instead.
+
+---
+
+## Updating to a new version
+
+```powershell
+cd $HOME\video-batch-pro
+git pull
+.\launch.bat
 ```
-┌─────────────────────────────────────────────────────────────────────┐
-│ Video Batch Pro          FFmpeg ✓   ·   Real-ESRGAN ✗ (fallback)    │
-├──────────────────────────────────┬──────────────────────────────────┤
-│ Videos                           │ Settings                         │
-│   [Add] [Remove] [Clear]         │  ┌ Watermark │ Upscale │ ... ┐  │
-│   ┌────────────────────────┐     │  │ [ ] Enable                │  │
-│   │ sample.mp4  1920x1080  │     │  │ Type: text ▾              │  │
-│   │ clip.mov    1280x720   │     │  │ Text: @YourChannel        │  │
-│   └────────────────────────┘     │  │ Position: bottom-right ▾  │  │
-│   Drag & drop video files here   │  │ Opacity ━━━━━○──── 80%    │  │
-│                                  │  │ Scale   ━━○──────── 100%  │  │
-├──────────────────────────────────┴──────────────────────────────────┤
-│ Overall: ████████████░░░░░░░░░░  60%                                │
-│ [Process All] [Cancel]                 [Open Output] [Export ZIP]   │
-└─────────────────────────────────────────────────────────────────────┘
+
+`launch.bat` automatically re-runs `pip install -r requirements.txt` if it detects missing dependencies.
+
+If you prefer not to use `launch.bat`:
+
+```powershell
+cd $HOME\video-batch-pro
+git pull
+.venv\Scripts\activate
+pip install -r requirements.txt
+python run.py
 ```
 
 ---
 
-## Project Layout
-
-```
-video_batch_pro/
-├── app/
-│   ├── main.py                   # entry point
-│   ├── ui/
-│   │   ├── main_window.py        # main window (PyQt5)
-│   │   ├── widgets.py            # drop list, cards, labeled sliders
-│   │   └── styles.py             # dark-mode QSS
-│   ├── processing/
-│   │   ├── ffmpeg_handler.py     # probing, overlay graph, encoding
-│   │   ├── upscale_handler.py    # Real-ESRGAN + FFmpeg fallback
-│   │   └── queue_manager.py      # threaded batch worker
-│   └── utils/
-│       ├── file_manager.py       # path helpers, validation
-│       ├── zip_export.py         # ZIP packager
-│       └── presets.py            # JSON preset save/load
-├── tests/                        # pytest suite (auto-skips if FFmpeg missing)
-├── run.py                        # `python run.py` launcher
-├── pyproject.toml
-├── requirements.txt
-├── requirements-dev.txt
-└── README.md
-```
-
----
-
-## Setup
-
-### 1. Python dependencies
+## Advanced / Manual installation
 
 You need **Python 3.9+**.
 
 ```bash
-# Clone
-git clone https://github.com/<your-account>/video-batch-pro.git
+git clone https://github.com/munnataiwan123-gif/video-batch-pro.git
 cd video-batch-pro
 
-# (Recommended) virtual environment
 python -m venv .venv
-# Windows:
-.venv\Scripts\activate
-# macOS / Linux:
-source .venv/bin/activate
+# Windows:   .venv\Scripts\activate
+# macOS/Linux: source .venv/bin/activate
 
-# Install runtime deps
 pip install -r requirements.txt
+python run.py
 ```
 
-### 2. FFmpeg (required)
+### FFmpeg (required)
 
-Video Batch Pro shells out to `ffmpeg` and `ffprobe` — they must be on `PATH`.
+Digitalinos shells out to `ffmpeg` and `ffprobe`. Both must be on `PATH`.
 
 **Windows**
 
-1. Download a static build from <https://www.gyan.dev/ffmpeg/builds/> (pick the **release full** build) or <https://github.com/BtbN/FFmpeg-Builds/releases>.
-2. Extract the ZIP to `C:\ffmpeg`.
-3. Add `C:\ffmpeg\bin` to your **System PATH**:
-   - *Start ▶ "Edit the system environment variables" ▶ Environment Variables ▶ Path ▶ Edit ▶ New ▶ `C:\ffmpeg\bin`*.
+1. Download a static build from <https://www.gyan.dev/ffmpeg/builds/> (*release essentials* is fine) or <https://github.com/BtbN/FFmpeg-Builds/releases>.
+2. Extract to `C:\ffmpeg`. Confirm `C:\ffmpeg\bin\ffmpeg.exe` exists.
+3. Add `C:\ffmpeg\bin` to your **System PATH**: *Start ▶ "Edit the system environment variables" ▶ Environment Variables ▶ Path ▶ Edit ▶ New ▶ `C:\ffmpeg\bin`*.
 4. Open a new terminal and verify:
    ```powershell
    ffmpeg -version
@@ -116,49 +97,77 @@ sudo apt-get update
 sudo apt-get install -y ffmpeg
 ```
 
-When you launch the app, the header shows "FFmpeg ✓" if it was detected.
+### Real-ESRGAN (optional, AI upscaling)
 
-### 3. Real-ESRGAN (optional, for AI upscaling)
+Download the portable `realesrgan-ncnn-vulkan` build from <https://github.com/xinntao/Real-ESRGAN/releases>, extract to a folder like `C:\realesrgan`, and add that folder to `PATH`. Relaunch the app — the header will show *Real-ESRGAN ✓*.
 
-Video Batch Pro integrates the portable **`realesrgan-ncnn-vulkan`** binary (no Python dependencies, no API calls, runs on your GPU via Vulkan). If it's not installed, upscaling transparently falls back to FFmpeg's Lanczos scaler.
-
-1. Download the pre-built binary from <https://github.com/xinntao/Real-ESRGAN/releases> (or the maintained fork <https://github.com/upscayl/upscayl-ncnn>). Pick the build matching your OS:
-   - Windows: `realesrgan-ncnn-vulkan-<ver>-windows.zip`
-   - macOS:   `realesrgan-ncnn-vulkan-<ver>-macos.zip`
-   - Linux:   `realesrgan-ncnn-vulkan-<ver>-ubuntu.zip`
-2. Extract it. The archive contains `realesrgan-ncnn-vulkan` (or `.exe`), plus a `models/` directory with the bundled weights (e.g. `realesr-animevideov3`, `realesrgan-x4plus`).
-3. Put the folder somewhere permanent (e.g. `C:\tools\realesrgan`) and add it to your `PATH` the same way as FFmpeg, or drop the binary next to your FFmpeg binary.
-4. Verify:
-   ```bash
-   realesrgan-ncnn-vulkan -h
-   ```
-5. Relaunch Video Batch Pro — the header should now show "Real-ESRGAN ✓".
-
-> **Vulkan driver note (Windows)**: Real-ESRGAN requires a working Vulkan driver. Most modern GPU drivers ship with one; run `vulkaninfoSDK` or `vulkaninfo` if you want to confirm.
+Without Real-ESRGAN the app still upscales perfectly well using FFmpeg Lanczos + the *CapCut Ultra HD* / *4K Crisp* sharpening templates.
 
 ---
 
-## Running the app
+## In-app help
 
-```bash
-python run.py
+Open the **Help** tab inside the app for a full walkthrough including tips on:
+
+- Video duration & performance (no hard limit; longer clips take more CPU / disk).
+- Supported formats: `.mp4 .mov .mkv .avi .webm .flv .m4v .mpg .mpeg .wmv .ts`.
+- Watermark tips: text shadow, font file picker, image positioning.
+- Upscaling guidance.
+- Preset selection tips (which template for which use case).
+
+---
+
+## Quality templates — when to use which
+
+| Template | Height | CRF | Sharpen | Use case |
+|---|---|---|---|---|
+| Original (no changes) | source | 20 | off | Keep exactly what you had, just apply the watermark |
+| YouTube 1080p Clean | 1080 | 19 | 0.6 | YouTube uploads, social posts |
+| **CapCut Ultra HD (1440p)** | 1440 | 18 | 0.9 | Crisp, clean, CapCut-style output |
+| **4K Crisp (2160p)** | 2160 | 17 | 1.0 | Archival / big-screen / premium channel |
+| Fast Preview | 720 | 26 | off | Quick draft to check the watermark placement |
+
+The template dropdown in the **Output** tab auto-updates preset / CRF / sharpen values so you can see exactly what's being applied.
+
+---
+
+## Output naming
+
+- **Default**: `<sourcename>_processed.mp4`.
+- **Sequential** (tick the checkbox in the Output tab): `01_ab12cd.mp4`, `02_ef34gh.mp4`, …
+  - Index is 1-based, zero-padded to fit the batch size (batch of 12 → `01..12`).
+  - Each file gets a random 6-char hex code to avoid collisions across runs.
+
+---
+
+## Typical workflow
+
+1. Add videos (drag & drop or *Add Videos…*).
+2. Tick **Enable watermark / overlay**, pick text or image, tweak position / opacity / scale, choose a font file (optional).
+3. Go to the **Output** tab and pick a quality template (start with *CapCut Ultra HD* for clean output).
+4. Tick **Rename outputs sequentially** if you want numbered files.
+5. Click **Process All** (enabled automatically once you've added at least one video).
+6. Click **Export All as ZIP** once processing completes.
+7. Save your configuration on the **Presets** tab.
+
+---
+
+## Project layout
+
 ```
-
-or, after `pip install -e .`:
-
-```bash
-video-batch-pro
+video_batch_pro/
+├── app/
+│   ├── main.py
+│   ├── ui/          main window, widgets, styles (QSS)
+│   ├── processing/  ffmpeg_handler, upscale_handler, queue_manager
+│   └── utils/       file_manager, zip_export, presets
+├── tests/           pytest suite
+├── launch.bat       Windows 1-click launcher
+├── launch.sh        macOS / Linux 1-click launcher
+├── run.py
+├── requirements.txt
+└── README.md
 ```
-
-### Typical workflow
-
-1. Drag video files into the left panel (or use *Add Videos…*).
-2. Open the **Watermark** tab and choose *text* or *image*, tweak position/opacity/scale.
-3. (Optional) In the **Upscale** tab, enable upscaling and pick a target resolution + backend.
-4. (Optional) **Output** tab: choose the output folder and x264 preset/CRF.
-5. Click **Process All**. Progress is shown per file and overall.
-6. Click **Export All as ZIP** to package the outputs into a single archive.
-7. Save your configuration as a preset in the **Presets** tab (e.g. "YouTube watermark").
 
 ---
 
@@ -169,30 +178,21 @@ pip install -r requirements-dev.txt
 pytest
 ```
 
-The test suite:
-
-- Validates pure-Python helpers (filters, presets, ZIP export, path building).
-- If `ffmpeg` / `ffprobe` are available on `PATH`, also runs **integration tests** that:
-  - Generate synthetic clips via `ffmpeg -f lavfi`,
-  - Probe them with `ffprobe`,
-  - Apply text + image overlays,
-  - Upscale with FFmpeg,
-  - Export outputs as a ZIP archive and check the contents.
-
-Tests that require FFmpeg are **skipped automatically** when it is not installed.
+The suite auto-skips FFmpeg integration tests if FFmpeg isn't on PATH. UI smoke tests run offscreen via `QT_QPA_PLATFORM=offscreen`.
 
 ---
 
 ## Error handling
 
-- Files that are not valid videos are rejected with a clear dialog ("Cannot read video: …").
-- FFmpeg stderr is captured and shown in the status bar on failure.
-- If FFmpeg is missing, a warning dialog appears at startup and **Process All** is blocked with an explanation.
-- Each file's state is tracked independently: a single bad file does not abort the batch.
-- Cancellation mid-batch is supported (terminates the current FFmpeg process cleanly).
+- Invalid videos are rejected with a clear dialog.
+- Missing FFmpeg blocks processing with an explanatory message (action buttons stay disabled).
+- **Process All** is disabled until at least one video is loaded and FFmpeg is detected.
+- **Cancel** is only active while a batch is running.
+- **Export All as ZIP** is disabled until at least one file completes successfully.
+- Cancellation mid-batch terminates the current FFmpeg process cleanly.
 
 ---
 
 ## License
 
-MIT — see the standard MIT text. Third-party components (FFmpeg, Real-ESRGAN) carry their own licenses.
+MIT — see `LICENSE`.

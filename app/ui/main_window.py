@@ -1,9 +1,8 @@
-"""Main window for Video Batch Pro."""
+"""Main window for Digitalinos Video Batch Pro."""
 
 from __future__ import annotations
 
 import os
-from dataclasses import replace
 from pathlib import Path
 from typing import Optional
 
@@ -12,8 +11,10 @@ from PyQt5 import QtCore, QtGui, QtWidgets
 from ..processing.ffmpeg_handler import (
     EncodeOptions,
     FFmpegError,
+    QUALITY_TEMPLATES,
     VideoInfo,
     WatermarkSettings,
+    apply_quality_template,
     ffmpeg_available,
     ffmpeg_version,
     probe_video,
@@ -32,7 +33,7 @@ from ..utils.presets import (
     save_preset,
 )
 from ..utils.zip_export import export_zip
-from .styles import DARK_QSS
+from .styles import BRAND_NAME, DARK_QSS, PRODUCT_NAME
 from .widgets import Card, DropListWidget, LabeledSlider, VideoListItemWidget
 
 
@@ -48,24 +49,97 @@ POSITIONS = [
 ]
 
 
+HELP_TEXT = f"""
+<h2>{BRAND_NAME} {PRODUCT_NAME} — How to use</h2>
+
+<b>1. Add videos</b>
+<ul>
+<li>Click <b>Add Videos…</b> or drag &amp; drop files into the left panel.</li>
+<li>Supported formats: mp4, mov, mkv, avi, webm, flv, m4v, mpg, mpeg, wmv, ts.</li>
+<li>Each row shows the <b>file name</b>, <b>resolution</b>, <b>duration</b> and <b>size</b>.</li>
+<li>There is <b>no hard limit</b> on video duration or count — but longer/bigger
+jobs will take more disk space and CPU time.</li>
+</ul>
+
+<b>2. Configure watermark (optional)</b>
+<ul>
+<li>Enable the watermark and choose <i>text</i> or <i>image</i> mode.</li>
+<li>Pick a preset position, or choose <i>custom</i> and set X/Y in pixels.</li>
+<li>For text: adjust opacity, scale, font size, colour, and optionally pick a
+<i>font file</i> (any .ttf / .otf — e.g. from <code>C:\\Windows\\Fonts</code>).
+A drop shadow is applied automatically for legibility.</li>
+<li>For image: PNG with transparency gives the cleanest results. The image is
+locked in place for the whole video by default (no unintended flicker).</li>
+<li><b>Bounce watermark (DVD-style)</b>: tick this to make the text or logo
+drift diagonally and bounce off the edges of the video. Pick
+<i>slow / medium / fast</i>. Position / custom X / Y are ignored while
+bounce is on.</li>
+</ul>
+
+<b>3. Pick a quality template</b>
+<ul>
+<li>Go to the <b>Output</b> tab and pick a template:</li>
+<li><b>Original</b> — keep source resolution, balanced quality.</li>
+<li><b>YouTube 1080p Clean</b> — 1080p with mild sharpening, great for social.</li>
+<li><b>CapCut Ultra HD (1440p)</b> — 1440p with strong sharpening for crisp,
+clean-looking clips (blur reduction).</li>
+<li><b>4K Crisp (2160p)</b> — full 4K with Lanczos scale + unsharp for the
+cleanest final output (slowest).</li>
+<li><b>Fast Preview</b> — 720p draft encode, very fast.</li>
+</ul>
+
+<b>4. Output naming</b>
+<ul>
+<li>Default: <code>&lt;sourcename&gt;_processed.mp4</code>.</li>
+<li>Tick <b>Rename outputs sequentially</b> to get <code>1_abc123.mp4</code>,
+<code>2_def456.mp4</code>, … — perfect for bulk uploads.</li>
+</ul>
+
+<b>5. Presets</b>
+<ul>
+<li>Save your exact settings (watermark + upscale) on the <b>Presets</b> tab.</li>
+<li>Examples: <i>YouTube watermark</i>, <i>4K upscale + logo</i>.</li>
+</ul>
+
+<b>6. Run the batch</b>
+<ul>
+<li>Once videos are loaded, <b>Process All</b> becomes active. Click it.</li>
+<li>Watch per-file + overall progress. Use <b>Cancel</b> to stop mid-batch.</li>
+<li>After at least one video succeeds, <b>Export All as ZIP</b> unlocks.</li>
+</ul>
+
+<b>7. Tips</b>
+<ul>
+<li>For CapCut-level crispness: use <b>CapCut Ultra HD</b> + a PNG logo.</li>
+<li>For YouTube Shorts / Reels: use <b>YouTube 1080p Clean</b> with bottom-right
+watermark at 80% opacity.</li>
+<li>If a file fails, hover its row to see the error — usually a corrupt source.</li>
+<li>All processing is 100% <b>offline</b>. No videos ever leave your PC.</li>
+</ul>
+"""
+
+
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("Video Batch Pro")
-        self.resize(1280, 820)
-        self.setMinimumSize(1060, 680)
+        self.setWindowTitle(f"{BRAND_NAME} {PRODUCT_NAME}")
+        self.resize(1320, 860)
+        self.setMinimumSize(1080, 700)
 
         self._items: list[QueueItem] = []
         self._item_widgets: list[VideoListItemWidget] = []
         self._worker: Optional[BatchWorker] = None
         self._worker_thread: Optional[QtCore.QThread] = None
-        self._output_dir = os.path.join(str(Path.home()), "VideoBatchPro", "output")
+        self._output_dir = os.path.join(str(Path.home()), "Digitalinos", "output")
         os.makedirs(self._output_dir, exist_ok=True)
+        self._processing = False
+        self._any_done = False
 
         self.setStyleSheet(DARK_QSS)
         self._build_ui()
         self._check_tool_availability()
         self._refresh_preset_list()
+        self._refresh_button_states()
 
     # ------------------------------------------------------------------
     # UI construction
@@ -89,12 +163,17 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _build_header(self) -> QtWidgets.QHBoxLayout:
         row = QtWidgets.QHBoxLayout()
-        title = QtWidgets.QLabel("Video Batch Pro")
+
+        brand = QtWidgets.QLabel(BRAND_NAME.upper())
+        brand.setObjectName("brand")
+        title = QtWidgets.QLabel(PRODUCT_NAME)
         title.setObjectName("h1")
-        subtitle = QtWidgets.QLabel("Offline batch watermark, upscale & export")
+        subtitle = QtWidgets.QLabel("Offline batch watermark, upscale &amp; export")
         subtitle.setObjectName("muted")
+
         col = QtWidgets.QVBoxLayout()
-        col.setSpacing(2)
+        col.setSpacing(0)
+        col.addWidget(brand)
         col.addWidget(title)
         col.addWidget(subtitle)
         row.addLayout(col)
@@ -102,6 +181,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.tool_status = QtWidgets.QLabel("Checking FFmpeg…")
         self.tool_status.setObjectName("muted")
+        self.tool_status.setAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
         row.addWidget(self.tool_status)
         return row
 
@@ -124,15 +204,15 @@ class MainWindow(QtWidgets.QMainWindow):
         layout.addLayout(header)
 
         btn_row = QtWidgets.QHBoxLayout()
-        add_btn = QtWidgets.QPushButton("Add Videos…")
-        add_btn.clicked.connect(self._browse_for_videos)
-        remove_btn = QtWidgets.QPushButton("Remove Selected")
-        remove_btn.clicked.connect(self._remove_selected)
-        clear_btn = QtWidgets.QPushButton("Clear")
-        clear_btn.clicked.connect(self._clear_list)
-        btn_row.addWidget(add_btn)
-        btn_row.addWidget(remove_btn)
-        btn_row.addWidget(clear_btn)
+        self.add_btn = QtWidgets.QPushButton("Add Videos…")
+        self.add_btn.clicked.connect(self._browse_for_videos)
+        self.remove_btn = QtWidgets.QPushButton("Remove Selected")
+        self.remove_btn.clicked.connect(self._remove_selected)
+        self.clear_btn = QtWidgets.QPushButton("Clear")
+        self.clear_btn.clicked.connect(self._clear_list)
+        btn_row.addWidget(self.add_btn)
+        btn_row.addWidget(self.remove_btn)
+        btn_row.addWidget(self.clear_btn)
         btn_row.addStretch(1)
         layout.addLayout(btn_row)
 
@@ -140,7 +220,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.list_widget.files_dropped.connect(self._add_files)
         layout.addWidget(self.list_widget, stretch=1)
 
-        hint = QtWidgets.QLabel("Drag & drop video files here, or click 'Add Videos…'.")
+        hint = QtWidgets.QLabel("Drag &amp; drop video files here, or click 'Add Videos…'.")
         hint.setObjectName("muted")
         hint.setAlignment(QtCore.Qt.AlignCenter)
         layout.addWidget(hint)
@@ -160,8 +240,9 @@ class MainWindow(QtWidgets.QMainWindow):
         tabs = QtWidgets.QTabWidget()
         tabs.addTab(self._build_watermark_tab(), "Watermark")
         tabs.addTab(self._build_upscale_tab(), "Upscale")
-        tabs.addTab(self._build_preset_tab(), "Presets")
         tabs.addTab(self._build_output_tab(), "Output")
+        tabs.addTab(self._build_preset_tab(), "Presets")
+        tabs.addTab(self._build_help_tab(), "Help")
         layout.addWidget(tabs, stretch=1)
         return card
 
@@ -188,8 +269,28 @@ class MainWindow(QtWidgets.QMainWindow):
         self.wm_text.setPlaceholderText("Watermark text (e.g. @YourChannel)")
         l.addWidget(self.wm_text)
 
+        # Font file picker (text mode only)
+        font_row = QtWidgets.QHBoxLayout()
+        font_row.addWidget(QtWidgets.QLabel("Font file:"))
+        self.wm_font_path = QtWidgets.QLineEdit()
+        self.wm_font_path.setPlaceholderText("Optional .ttf / .otf — defaults to system font")
+        browse_font = QtWidgets.QPushButton("Browse…")
+        browse_font.clicked.connect(self._browse_font_file)
+        clear_font = QtWidgets.QPushButton("Clear")
+        clear_font.clicked.connect(lambda: self.wm_font_path.clear())
+        font_row.addWidget(self.wm_font_path, stretch=1)
+        font_row.addWidget(browse_font)
+        font_row.addWidget(clear_font)
+        l.addLayout(font_row)
+
+        # Shadow toggle
+        self.wm_shadow = QtWidgets.QCheckBox("Drop shadow behind text (recommended)")
+        self.wm_shadow.setChecked(True)
+        l.addWidget(self.wm_shadow)
+
         # Image chooser
         img_row = QtWidgets.QHBoxLayout()
+        img_row.addWidget(QtWidgets.QLabel("Logo:"))
         self.wm_image_path = QtWidgets.QLineEdit()
         self.wm_image_path.setPlaceholderText("Logo image (PNG with alpha recommended)")
         browse_img = QtWidgets.QPushButton("Browse…")
@@ -221,6 +322,22 @@ class MainWindow(QtWidgets.QMainWindow):
         xy_row.addStretch(1)
         l.addLayout(xy_row)
 
+        # Bounce (DVD-screensaver style animation)
+        bounce_row = QtWidgets.QHBoxLayout()
+        self.wm_bounce = QtWidgets.QCheckBox("Bounce watermark (DVD-style)")
+        self.wm_bounce.setToolTip(
+            "Make the watermark drift diagonally and bounce off the edges "
+            "of the video. Works for both text and image logos."
+        )
+        bounce_row.addWidget(self.wm_bounce)
+        bounce_row.addWidget(QtWidgets.QLabel("speed:"))
+        self.wm_bounce_speed = QtWidgets.QComboBox()
+        self.wm_bounce_speed.addItems(["slow", "medium", "fast"])
+        self.wm_bounce_speed.setCurrentText("slow")
+        bounce_row.addWidget(self.wm_bounce_speed)
+        bounce_row.addStretch(1)
+        l.addLayout(bounce_row)
+
         # Opacity + scale + font size
         self.wm_opacity = LabeledSlider("Opacity", 0, 100, 80, suffix="%")
         l.addWidget(self.wm_opacity)
@@ -241,20 +358,26 @@ class MainWindow(QtWidgets.QMainWindow):
         # React to mode changes
         def _update_mode(_: str = "") -> None:
             is_text = self.wm_mode.currentText() == "text"
-            self.wm_text.setEnabled(is_text)
-            self.wm_fontsize.setEnabled(is_text)
-            self.wm_fontcolor.setEnabled(is_text)
+            for widget in (self.wm_text, self.wm_font_path, self.wm_shadow,
+                           self.wm_fontsize, self.wm_fontcolor):
+                widget.setEnabled(is_text)
             self.wm_image_path.setEnabled(not is_text)
 
         self.wm_mode.currentTextChanged.connect(_update_mode)
         _update_mode()
 
-        def _update_custom_xy(text: str = "") -> None:
+        def _update_custom_xy(_: str = "") -> None:
+            bouncing = self.wm_bounce.isChecked()
             is_custom = self.wm_position.currentText() == "custom"
-            self.wm_x.setEnabled(is_custom)
-            self.wm_y.setEnabled(is_custom)
+            # Bounce overrides manual positioning — disable all placement
+            # controls so the user isn't confused by dead knobs.
+            self.wm_position.setEnabled(not bouncing)
+            self.wm_x.setEnabled(is_custom and not bouncing)
+            self.wm_y.setEnabled(is_custom and not bouncing)
+            self.wm_bounce_speed.setEnabled(bouncing)
 
         self.wm_position.currentTextChanged.connect(_update_custom_xy)
+        self.wm_bounce.stateChanged.connect(lambda _=0: _update_custom_xy())
         _update_custom_xy()
 
         l.addStretch(1)
@@ -287,12 +410,95 @@ class MainWindow(QtWidgets.QMainWindow):
         l.addLayout(backend_row)
 
         info_text = QtWidgets.QLabel(
-            "Real-ESRGAN is used when available (frame-by-frame AI upscale)."
-            " Otherwise the FFmpeg Lanczos scaler is used — fast but not AI-based."
+            "<b>Real-ESRGAN</b> does frame-by-frame AI upscale (best quality, slow). "
+            "<b>FFmpeg Lanczos</b> is instant and still gives CapCut-style clean "
+            "output when combined with the quality template sharpening in the "
+            "<i>Output</i> tab."
         )
         info_text.setObjectName("muted")
         info_text.setWordWrap(True)
         l.addWidget(info_text)
+
+        l.addStretch(1)
+        return w
+
+    def _build_output_tab(self) -> QtWidgets.QWidget:
+        w = QtWidgets.QWidget()
+        l = QtWidgets.QVBoxLayout(w)
+        l.setContentsMargins(4, 4, 4, 4)
+        l.setSpacing(8)
+
+        # Output folder
+        row = QtWidgets.QHBoxLayout()
+        row.addWidget(QtWidgets.QLabel("Output folder:"))
+        self.out_dir_edit = QtWidgets.QLineEdit(self._output_dir)
+        row.addWidget(self.out_dir_edit, stretch=1)
+        browse = QtWidgets.QPushButton("Browse…")
+        browse.clicked.connect(self._browse_output_dir)
+        row.addWidget(browse)
+        l.addLayout(row)
+
+        # Quality template
+        tpl_row = QtWidgets.QHBoxLayout()
+        tpl_row.addWidget(QtWidgets.QLabel("Quality template:"))
+        self.qual_template = QtWidgets.QComboBox()
+        self.qual_template.addItems(list(QUALITY_TEMPLATES.keys()))
+        self.qual_template.setCurrentText("Original (no changes)")
+        self.qual_template.setToolTip(
+            "Quick presets for quality. CapCut Ultra HD and 4K Crisp apply "
+            "Lanczos scaling + sharpening for a clean, non-blurry look."
+        )
+        tpl_row.addWidget(self.qual_template, stretch=1)
+        l.addLayout(tpl_row)
+
+        # Encoder preset + CRF (manual override)
+        row2 = QtWidgets.QHBoxLayout()
+        row2.addWidget(QtWidgets.QLabel("Encoder preset:"))
+        self.enc_preset = QtWidgets.QComboBox()
+        self.enc_preset.addItems(["ultrafast", "fast", "medium", "slow"])
+        self.enc_preset.setCurrentText("medium")
+        row2.addWidget(self.enc_preset)
+        row2.addWidget(QtWidgets.QLabel("CRF:"))
+        self.enc_crf = QtWidgets.QSpinBox()
+        self.enc_crf.setRange(0, 51)
+        self.enc_crf.setValue(20)
+        row2.addWidget(self.enc_crf)
+        row2.addStretch(1)
+        l.addLayout(row2)
+
+        # Sharpen (manual)
+        sharp_row = QtWidgets.QHBoxLayout()
+        self.sharpen_enable = QtWidgets.QCheckBox("Sharpen (extra crisp)")
+        sharp_row.addWidget(self.sharpen_enable)
+        self.sharpen_amount = QtWidgets.QDoubleSpinBox()
+        self.sharpen_amount.setRange(0.0, 1.5)
+        self.sharpen_amount.setSingleStep(0.1)
+        self.sharpen_amount.setValue(0.6)
+        sharp_row.addWidget(QtWidgets.QLabel("amount:"))
+        sharp_row.addWidget(self.sharpen_amount)
+        sharp_row.addStretch(1)
+        l.addLayout(sharp_row)
+
+        # Sequential naming
+        self.rename_sequential = QtWidgets.QCheckBox(
+            "Rename outputs sequentially (1_abc123.mp4, 2_def456.mp4, …)"
+        )
+        self.rename_sequential.setToolTip(
+            "Useful for bulk uploads. Each output gets a 1-based index + a "
+            "random 6-char code appended, e.g. '03_ab12cd.mp4'."
+        )
+        l.addWidget(self.rename_sequential)
+
+        note = QtWidgets.QLabel(
+            "The quality template sets encoder preset / CRF / sharpening "
+            "automatically — pick one first, then fine-tune."
+        )
+        note.setObjectName("muted")
+        note.setWordWrap(True)
+        l.addWidget(note)
+
+        # When a template is picked, sync the fields so the user sees the effect.
+        self.qual_template.currentTextChanged.connect(self._apply_quality_template_to_ui)
 
         l.addStretch(1)
         return w
@@ -334,36 +540,14 @@ class MainWindow(QtWidgets.QMainWindow):
         l.addWidget(path_label)
         return w
 
-    def _build_output_tab(self) -> QtWidgets.QWidget:
+    def _build_help_tab(self) -> QtWidgets.QWidget:
         w = QtWidgets.QWidget()
         l = QtWidgets.QVBoxLayout(w)
         l.setContentsMargins(4, 4, 4, 4)
-        l.setSpacing(8)
-
-        row = QtWidgets.QHBoxLayout()
-        row.addWidget(QtWidgets.QLabel("Output folder:"))
-        self.out_dir_edit = QtWidgets.QLineEdit(self._output_dir)
-        row.addWidget(self.out_dir_edit, stretch=1)
-        browse = QtWidgets.QPushButton("Browse…")
-        browse.clicked.connect(self._browse_output_dir)
-        row.addWidget(browse)
-        l.addLayout(row)
-
-        row2 = QtWidgets.QHBoxLayout()
-        row2.addWidget(QtWidgets.QLabel("Encoder preset:"))
-        self.enc_preset = QtWidgets.QComboBox()
-        self.enc_preset.addItems(["ultrafast", "fast", "medium", "slow"])
-        self.enc_preset.setCurrentText("medium")
-        row2.addWidget(self.enc_preset)
-        row2.addWidget(QtWidgets.QLabel("CRF:"))
-        self.enc_crf = QtWidgets.QSpinBox()
-        self.enc_crf.setRange(0, 51)
-        self.enc_crf.setValue(20)
-        row2.addWidget(self.enc_crf)
-        row2.addStretch(1)
-        l.addLayout(row2)
-
-        l.addStretch(1)
+        viewer = QtWidgets.QTextBrowser()
+        viewer.setOpenExternalLinks(True)
+        viewer.setHtml(HELP_TEXT)
+        l.addWidget(viewer, stretch=1)
         return w
 
     # ------------------------------------------------------------------
@@ -373,7 +557,6 @@ class MainWindow(QtWidgets.QMainWindow):
         card = Card()
         layout = card.layout()
 
-        # Overall progress bar
         row = QtWidgets.QHBoxLayout()
         row.addWidget(QtWidgets.QLabel("Overall:"))
         self.overall_bar = QtWidgets.QProgressBar()
@@ -381,7 +564,6 @@ class MainWindow(QtWidgets.QMainWindow):
         row.addWidget(self.overall_bar, stretch=1)
         layout.addLayout(row)
 
-        # Action buttons
         btns = QtWidgets.QHBoxLayout()
         self.process_btn = QtWidgets.QPushButton("Process All")
         self.process_btn.setObjectName("primary")
@@ -412,20 +594,41 @@ class MainWindow(QtWidgets.QMainWindow):
         return card
 
     # ------------------------------------------------------------------
+    # Button state logic
+    # ------------------------------------------------------------------
+    def _refresh_button_states(self) -> None:
+        """Enable/disable action buttons based on queue + processing state."""
+        has_items = len(self._items) > 0
+        ffmpeg_ok = ffmpeg_available()
+
+        # Process All: needs items, FFmpeg, and no running job.
+        self.process_btn.setEnabled(has_items and ffmpeg_ok and not self._processing)
+        # Cancel: only while processing.
+        self.cancel_btn.setEnabled(self._processing)
+        # Export ZIP: requires at least one completed item.
+        self.zip_btn.setEnabled(self._any_done and not self._processing)
+        # Add / Remove / Clear: disabled while processing.
+        self.add_btn.setEnabled(not self._processing)
+        self.remove_btn.setEnabled(not self._processing and has_items)
+        self.clear_btn.setEnabled(not self._processing and has_items)
+
+    # ------------------------------------------------------------------
     # Tool availability banner
     # ------------------------------------------------------------------
     def _check_tool_availability(self) -> None:
         parts = []
         if ffmpeg_available():
             v = ffmpeg_version()
-            parts.append(f"FFmpeg ✓ ({v.split(' ')[2] if v and len(v.split(' ')) > 2 else 'ok'})")
+            version_str = v.split(" ")[2] if v and len(v.split(" ")) > 2 else "ok"
+            parts.append(f"<span style='color:#1BB5C4;font-weight:600'>FFmpeg ✓</span> ({version_str})")
         else:
-            parts.append("FFmpeg ✗")
+            parts.append("<span style='color:#EF4444;font-weight:600'>FFmpeg ✗</span>")
         if realesrgan_available():
-            parts.append("Real-ESRGAN ✓")
+            parts.append("<span style='color:#1BB5C4;font-weight:600'>Real-ESRGAN ✓</span>")
         else:
-            parts.append("Real-ESRGAN ✗ (will use FFmpeg fallback)")
-        self.tool_status.setText("   ·   ".join(parts))
+            parts.append("<span style='color:#F59E0B;font-weight:600'>Real-ESRGAN ✗</span> (FFmpeg fallback)")
+        self.tool_status.setText("&nbsp;&nbsp;·&nbsp;&nbsp;".join(parts))
+        self.tool_status.setTextFormat(QtCore.Qt.RichText)
         if not ffmpeg_available():
             QtWidgets.QMessageBox.warning(
                 self,
@@ -458,6 +661,21 @@ class MainWindow(QtWidgets.QMainWindow):
         if path:
             self.wm_image_path.setText(path)
 
+    def _browse_font_file(self) -> None:
+        start = str(Path.home())
+        if os.name == "nt":
+            fonts = r"C:\Windows\Fonts"
+            if os.path.isdir(fonts):
+                start = fonts
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self,
+            "Select a font file",
+            start,
+            "Font files (*.ttf *.otf *.ttc);;All files (*.*)",
+        )
+        if path:
+            self.wm_font_path.setText(path)
+
     def _browse_output_dir(self) -> None:
         path = QtWidgets.QFileDialog.getExistingDirectory(
             self, "Select output folder", self.out_dir_edit.text() or str(Path.home())
@@ -469,7 +687,6 @@ class MainWindow(QtWidgets.QMainWindow):
     def _add_files(self, paths: list[str]) -> None:
         added = 0
         for p in paths:
-            # Deduplicate.
             if any(item.input_path == p for item in self._items):
                 continue
             info: VideoInfo | None = None
@@ -489,6 +706,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._update_count_label()
         if added:
             self.status_label.setText(f"Added {added} file(s).")
+        self._refresh_button_states()
 
     def _append_list_row(self, item: QueueItem) -> None:
         row_widget = VideoListItemWidget(item.input_path, item.info, self.list_widget)
@@ -505,16 +723,37 @@ class MainWindow(QtWidgets.QMainWindow):
             del self._items[row]
             del self._item_widgets[row]
         self._update_count_label()
+        self._refresh_button_states()
 
     def _clear_list(self) -> None:
         self.list_widget.clear()
         self._items.clear()
         self._item_widgets.clear()
+        self._any_done = False
         self._update_count_label()
+        self._refresh_button_states()
 
     def _update_count_label(self) -> None:
         n = len(self._items)
         self.count_label.setText(f"{n} file{'s' if n != 1 else ''}")
+
+    # ------------------------------------------------------------------
+    # Quality template -> UI sync
+    # ------------------------------------------------------------------
+    def _apply_quality_template_to_ui(self, _: str = "") -> None:
+        name = self.qual_template.currentText()
+        tpl = QUALITY_TEMPLATES.get(name)
+        if tpl is None:
+            return
+        self.enc_preset.setCurrentText(tpl.preset)
+        self.enc_crf.setValue(int(tpl.crf))
+        self.sharpen_enable.setChecked(bool(tpl.sharpen))
+        self.sharpen_amount.setValue(float(tpl.sharpen_amount))
+        if tpl.target_height is not None:
+            self.up_enable.setChecked(True)
+            heights = [1080, 1440, 2160]
+            if tpl.target_height in heights:
+                self.up_target.setCurrentIndex(heights.index(tpl.target_height))
 
     # ------------------------------------------------------------------
     # Presets
@@ -536,6 +775,10 @@ class MainWindow(QtWidgets.QMainWindow):
             scale=self.wm_scale.value() / 100.0,
             font_size=self.wm_fontsize.value(),
             font_color=self.wm_fontcolor.currentText(),
+            font_file=self.wm_font_path.text().strip(),
+            shadow=self.wm_shadow.isChecked(),
+            bounce=self.wm_bounce.isChecked(),
+            bounce_speed=self.wm_bounce_speed.currentText(),
         )
 
     def _collect_upscale(self) -> UpscaleOptions:
@@ -552,6 +795,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.wm_mode.setCurrentText(wm.mode)
         self.wm_text.setText(wm.text)
         self.wm_image_path.setText(wm.image_path)
+        self.wm_font_path.setText(getattr(wm, "font_file", "") or "")
+        self.wm_shadow.setChecked(bool(getattr(wm, "shadow", True)))
+        self.wm_bounce.setChecked(bool(getattr(wm, "bounce", False)))
+        bs = str(getattr(wm, "bounce_speed", "slow") or "slow")
+        idx = self.wm_bounce_speed.findText(bs)
+        if idx >= 0:
+            self.wm_bounce_speed.setCurrentIndex(idx)
         if wm.position in POSITIONS:
             self.wm_position.setCurrentText(wm.position)
         self.wm_x.setValue(int(wm.custom_x))
@@ -616,6 +866,17 @@ class MainWindow(QtWidgets.QMainWindow):
     # ------------------------------------------------------------------
     # Processing
     # ------------------------------------------------------------------
+    def _build_encode_options(self, wm: WatermarkSettings) -> EncodeOptions:
+        base = EncodeOptions(
+            watermark=wm,
+            target_height=None,
+            preset=self.enc_preset.currentText(),
+            crf=int(self.enc_crf.value()),
+            sharpen=self.sharpen_enable.isChecked(),
+            sharpen_amount=float(self.sharpen_amount.value()),
+        )
+        return apply_quality_template(base, self.qual_template.currentText())
+
     def _on_process_clicked(self) -> None:
         if not self._items:
             QtWidgets.QMessageBox.information(
@@ -633,25 +894,21 @@ class MainWindow(QtWidgets.QMainWindow):
         os.makedirs(self._output_dir, exist_ok=True)
 
         wm = self._collect_watermark()
-        enc = EncodeOptions(
-            watermark=wm,
-            target_height=None,
-            preset=self.enc_preset.currentText(),
-            crf=int(self.enc_crf.value()),
-        )
+        enc = self._build_encode_options(wm)
         up = self._collect_upscale()
 
-        # Reset per-item widgets.
         for widget in self._item_widgets:
             widget.set_status("pending")
             widget.set_progress(0.0)
         self.overall_bar.setValue(0)
+        self._any_done = False
 
         job = BatchJob(
             items=list(self._items),
             output_dir=self._output_dir,
             encode_options=enc,
             upscale_options=up,
+            sequential_naming=self.rename_sequential.isChecked(),
         )
 
         self._worker_thread = QtCore.QThread(self)
@@ -670,9 +927,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._worker_thread.finished.connect(self._worker.deleteLater)
         self._worker_thread.finished.connect(self._worker_thread.deleteLater)
 
-        self.process_btn.setEnabled(False)
-        self.cancel_btn.setEnabled(True)
+        self._processing = True
         self.status_label.setText("Processing…")
+        self._refresh_button_states()
         self._worker_thread.start()
 
     def _on_cancel_clicked(self) -> None:
@@ -693,7 +950,9 @@ class MainWindow(QtWidgets.QMainWindow):
         if 0 <= idx < len(self._item_widgets):
             self._item_widgets[idx].set_status("done")
             self._item_widgets[idx].set_progress(1.0)
+        self._any_done = True
         self.status_label.setText(f"Finished: {os.path.basename(output_path)}")
+        self._refresh_button_states()
 
     def _on_item_failed(self, idx: int, message: str) -> None:
         if 0 <= idx < len(self._item_widgets):
@@ -704,13 +963,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self.overall_bar.setValue(int(pct * 100))
 
     def _on_batch_finished(self, outputs: list) -> None:
-        self.process_btn.setEnabled(True)
-        self.cancel_btn.setEnabled(False)
+        self._processing = False
         ok = sum(1 for it in self._items if it.status == "done")
         failed = sum(1 for it in self._items if it.status == "error")
+        self._any_done = ok > 0
         self.status_label.setText(
             f"Batch finished. {ok} succeeded, {failed} failed. Output: {self._output_dir}"
         )
+        self._refresh_button_states()
 
     # ------------------------------------------------------------------
     # Export
@@ -718,7 +978,6 @@ class MainWindow(QtWidgets.QMainWindow):
     def _export_zip(self) -> None:
         outputs = [it.output_path for it in self._items if it.status == "done" and it.output_path]
         if not outputs:
-            # Fall back to scanning output folder.
             if os.path.isdir(self._output_dir):
                 outputs = [
                     os.path.join(self._output_dir, f)
@@ -731,7 +990,7 @@ class MainWindow(QtWidgets.QMainWindow):
             )
             return
 
-        default_zip = os.path.join(self._output_dir, "video_batch_pro_export.zip")
+        default_zip = os.path.join(self._output_dir, f"{BRAND_NAME.lower()}_export.zip")
         zip_path, _ = QtWidgets.QFileDialog.getSaveFileName(
             self, "Export as ZIP", default_zip, "ZIP archive (*.zip)"
         )

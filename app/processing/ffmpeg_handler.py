@@ -7,7 +7,7 @@ import os
 import re
 import shutil
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Iterable, Optional
 
@@ -155,7 +155,10 @@ class WatermarkSettings:
     scale: float = 1.0              # relative scale multiplier
     font_size: int = 36
     font_color: str = "white"
-    font_file: str = ""             # optional .ttf path (required by drawtext on some builds)
+    font_file: str = ""             # path to a .ttf / .otf file (optional)
+    shadow: bool = True             # drop shadow behind text
+    bounce: bool = False            # DVD-screensaver style animation
+    bounce_speed: str = "slow"      # "slow" | "medium" | "fast"
 
 
 def _escape_drawtext(text: str) -> str:
@@ -174,6 +177,51 @@ def _pos_exprs(settings: WatermarkSettings) -> tuple[str, str]:
     return POSITION_EXPRS.get(settings.position, POSITION_EXPRS["bottom-right"])
 
 
+# DVD-screensaver pixels-per-second for each speed preset. We use slightly
+# different X/Y velocities so the overlay doesn't move along a perfect 45°
+# line — looks more natural.
+BOUNCE_SPEEDS: dict[str, tuple[int, int]] = {
+    "slow":   (40, 28),
+    "medium": (90, 63),
+    "fast":   (160, 112),
+}
+
+
+def _bounce_exprs_text(speed: str) -> tuple[str, str]:
+    """Return ffmpeg drawtext x/y expressions for a DVD-style bounce.
+
+    Uses a triangle wave: `abs(mod(t*v, 2*(w-text_w)) - (w-text_w))` oscillates
+    between 0 and (w-text_w). `text_w` / `text_h` are drawtext-specific
+    variables that resolve to the rendered glyph box.
+    """
+    vx, vy = BOUNCE_SPEEDS.get(speed, BOUNCE_SPEEDS["slow"])
+    x = f"abs(mod(t*{vx}\\,2*(w-text_w))-(w-text_w))"
+    y = f"abs(mod(t*{vy}\\,2*(h-text_h))-(h-text_h))"
+    return x, y
+
+
+def _bounce_exprs_overlay(speed: str) -> tuple[str, str]:
+    """Return ffmpeg overlay x/y expressions for a DVD-style image bounce.
+
+    For the overlay filter, main video dimensions are `W`/`H` and the overlay
+    is `w`/`h`. Note: unlike drawtext, overlay expressions use `:` as the arg
+    separator so commas inside `mod()` do NOT need escaping.
+    """
+    vx, vy = BOUNCE_SPEEDS.get(speed, BOUNCE_SPEEDS["slow"])
+    # Escape commas so the filter-graph parser does not split on them.
+    x = f"abs(mod(t*{vx}\\,2*(W-w))-(W-w))"
+    y = f"abs(mod(t*{vy}\\,2*(H-h))-(H-h))"
+    return x, y
+
+
+def _escape_fontfile(path: str) -> str:
+    """Escape a font file path for FFmpeg's drawtext `fontfile=` parameter."""
+    path = path.replace("\\", "/")
+    path = path.replace(":", r"\:")
+    path = path.replace("'", r"\'")
+    return path
+
+
 def build_overlay_filtergraph(
     settings: WatermarkSettings,
     base_width: int,
@@ -182,7 +230,9 @@ def build_overlay_filtergraph(
     """Return (extra_input_args, filter_complex_parts) for an overlay.
 
     The caller is responsible for prepending the primary `-i input.mp4` and
-    joining `filter_complex_parts` with `;`.
+    joining `filter_complex_parts` with `;`. Image inputs are loaded with
+    `-loop 1` so a still image stays stable across the whole duration of the
+    main video (this is what fixes the "bouncing" issue).
     """
     if not settings.enabled:
         return [], []
@@ -192,14 +242,20 @@ def build_overlay_filtergraph(
     if settings.mode == "image":
         if not settings.image_path or not os.path.isfile(settings.image_path):
             raise FFmpegError(f"Watermark image not found: {settings.image_path!r}")
+        if settings.bounce:
+            x_expr, y_expr = _bounce_exprs_overlay(settings.bounce_speed)
         # Scale overlay relative to main width (10% default * scale multiplier).
         target_w = max(1, int(base_width * 0.1 * settings.scale))
-        extra_inputs = ["-i", settings.image_path]
-        # [1:v] is the overlay stream.
+        # -loop 1 keeps the still image alive for the whole video duration;
+        # without it, FFmpeg would emit a single frame and the overlay would
+        # flash/disappear (the "bouncing" the user reported).
+        extra_inputs = ["-loop", "1", "-i", settings.image_path]
         fc = [
-            f"[1:v]scale={target_w}:-1,format=rgba,"
+            # Normalize SAR so overlay doesn't stretch or jitter on mixed aspect
+            # sources, and force rgba so alpha blending is consistent.
+            f"[1:v]scale={target_w}:-1:flags=lanczos,setsar=1,format=rgba,"
             f"colorchannelmixer=aa={settings.opacity:.3f}[wm]",
-            f"[0:v][wm]overlay={x_expr}:{y_expr}[vout]",
+            f"[0:v][wm]overlay={x_expr}:{y_expr}:shortest=1[vout]",
         ]
         return extra_inputs, fc
 
@@ -211,19 +267,35 @@ def build_overlay_filtergraph(
     alpha = max(0.0, min(1.0, settings.opacity))
     font_clause = ""
     if settings.font_file and os.path.isfile(settings.font_file):
-        font_clause = f"fontfile='{settings.font_file}':"
-    drawtext = (
-        f"drawtext={font_clause}text='{text}':"
-        f"fontcolor={settings.font_color}@{alpha:.3f}:"
-        f"fontsize={font_size}:"
-        f"x={x_expr}:y={y_expr}:"
-        f"box=1:boxcolor=black@{max(0.0, alpha - 0.3):.3f}:boxborderw=6"
-    )
+        font_clause = f"fontfile='{_escape_fontfile(settings.font_file)}':"
+
+    if settings.bounce:
+        x_expr, y_expr = _bounce_exprs_text(settings.bounce_speed)
+
+    # Build drawtext parameters. We pair a semi-transparent box with a
+    # drop-shadow for a professional CapCut-style overlay.
+    parts = [
+        f"drawtext={font_clause}text='{text}'",
+        f"fontcolor={settings.font_color}@{alpha:.3f}",
+        f"fontsize={font_size}",
+        f"x={x_expr}",
+        f"y={y_expr}",
+        f"box=1",
+        f"boxcolor=black@{max(0.0, alpha - 0.3):.3f}",
+        f"boxborderw=8",
+    ]
+    if settings.shadow:
+        parts.extend([
+            f"shadowcolor=black@{max(0.3, alpha * 0.8):.3f}",
+            "shadowx=2",
+            "shadowy=2",
+        ])
+    drawtext = ":".join(parts)
     return [], [f"[0:v]{drawtext}[vout]"]
 
 
 # ---------------------------------------------------------------------------
-# Encode with optional overlay + optional scale
+# Encode with optional overlay + optional scale + optional sharpen
 # ---------------------------------------------------------------------------
 
 @dataclass
@@ -235,6 +307,10 @@ class EncodeOptions:
     preset: str = "medium"
     audio_codec: str = "aac"
     audio_bitrate: str = "192k"
+    sharpen: bool = False                 # apply `unsharp` filter for a crisp
+                                          # CapCut-style ultra-HD look
+    sharpen_amount: float = 0.8           # 0 (none) - 1.5 (very sharp)
+    pixel_format: str = "yuv420p"         # broadly compatible output pix fmt
 
 
 ProgressCallback = Callable[[float], None]
@@ -242,6 +318,42 @@ ProgressCallback = Callable[[float], None]
 
 
 _TIME_RE = re.compile(r"out_time_ms=(\d+)")
+
+
+def _chain_post_filters(
+    filter_parts: list[str],
+    options: EncodeOptions,
+    info: VideoInfo,
+) -> list[str]:
+    """Append optional scale + sharpen filters after the overlay step.
+
+    We re-label the terminal `[vout]` sink so subsequent filters can chain on.
+    """
+    post: list[str] = []
+    do_scale = (
+        options.target_height
+        and options.target_height > 0
+        and options.target_height != info.height
+    )
+    do_sharpen = options.sharpen and options.sharpen_amount > 0
+
+    if not do_scale and not do_sharpen:
+        return filter_parts
+
+    last = filter_parts[-1]
+    last_no_sink = last.rsplit("[vout]", 1)[0]
+    chain = [f"{last_no_sink}[pre_post]"]
+
+    stages: list[str] = []
+    if do_scale:
+        stages.append(f"scale=-2:{int(options.target_height)}:flags=lanczos")
+    if do_sharpen:
+        # unsharp: luma_msize_x:luma_msize_y:luma_amount:chroma_msize_x:chroma_msize_y:chroma_amount
+        a = max(0.0, min(1.5, float(options.sharpen_amount)))
+        stages.append(f"unsharp=5:5:{a:.2f}:5:5:0.0")
+
+    chain.append(f"[pre_post]{','.join(stages)}[vout]")
+    return filter_parts[:-1] + [";".join(chain)]
 
 
 def process_video(
@@ -252,7 +364,7 @@ def process_video(
     progress_cb: Optional[ProgressCallback] = None,
     cancel_flag: Optional[Callable[[], bool]] = None,
 ) -> None:
-    """Run a full encode with overlay + optional upscale.
+    """Run a full encode with overlay + optional upscale + optional sharpen.
 
     `progress_cb` is invoked with a 0.0-1.0 float as FFmpeg emits progress.
     `cancel_flag` is a callable that returns True when processing should abort.
@@ -270,16 +382,7 @@ def process_video(
     if not filter_parts:
         filter_parts = ["[0:v]null[vout]"]
 
-    # Append scale filter for upscaling (applies *after* overlay).
-    if options.target_height and options.target_height > 0 and options.target_height != info.height:
-        # Replace last [vout] sink to chain a scale step.
-        last = filter_parts[-1]
-        last_no_sink = last.rsplit("[vout]", 1)[0]
-        filter_parts[-1] = (
-            f"{last_no_sink}[pre_scale];"
-            f"[pre_scale]scale=-2:{int(options.target_height)}:flags=lanczos[vout]"
-        )
-
+    filter_parts = _chain_post_filters(filter_parts, options, info)
     filter_complex = ";".join(filter_parts)
 
     cmd: list[str] = [
@@ -299,6 +402,7 @@ def process_video(
         "-c:v", options.video_codec,
         "-preset", options.preset,
         "-crf", str(options.crf),
+        "-pix_fmt", options.pixel_format,
         "-c:a", options.audio_codec,
         "-b:a", options.audio_bitrate,
         "-movflags", "+faststart",
@@ -365,13 +469,7 @@ def build_command_preview(
     )
     if not filter_parts:
         filter_parts = ["[0:v]null[vout]"]
-    if options.target_height and options.target_height > 0 and options.target_height != info.height:
-        last = filter_parts[-1]
-        last_no_sink = last.rsplit("[vout]", 1)[0]
-        filter_parts[-1] = (
-            f"{last_no_sink}[pre_scale];"
-            f"[pre_scale]scale=-2:{int(options.target_height)}:flags=lanczos[vout]"
-        )
+    filter_parts = _chain_post_filters(filter_parts, options, info)
     filter_complex = ";".join(filter_parts)
 
     cmd: list[str] = [
@@ -386,9 +484,78 @@ def build_command_preview(
         "-c:v", options.video_codec,
         "-preset", options.preset,
         "-crf", str(options.crf),
+        "-pix_fmt", options.pixel_format,
         "-c:a", options.audio_codec,
         "-b:a", options.audio_bitrate,
         "-movflags", "+faststart",
         output_path,
     ])
     return cmd
+
+
+# ---------------------------------------------------------------------------
+# Built-in quality presets (Digitalinos templates)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class QualityTemplate:
+    """Preset-style knobs for the encoder. Applied on top of user watermark."""
+    name: str
+    target_height: Optional[int]   # None = keep source height
+    preset: str                    # x264 preset
+    crf: int                       # lower = better quality
+    sharpen: bool
+    sharpen_amount: float
+    audio_bitrate: str = "192k"
+
+
+QUALITY_TEMPLATES: dict[str, QualityTemplate] = {
+    "Original (no changes)": QualityTemplate(
+        name="Original (no changes)",
+        target_height=None, preset="medium", crf=20,
+        sharpen=False, sharpen_amount=0.0,
+    ),
+    "YouTube 1080p Clean": QualityTemplate(
+        name="YouTube 1080p Clean",
+        target_height=1080, preset="slow", crf=19,
+        sharpen=True, sharpen_amount=0.6,
+    ),
+    "CapCut Ultra HD (1440p)": QualityTemplate(
+        name="CapCut Ultra HD (1440p)",
+        target_height=1440, preset="slow", crf=18,
+        sharpen=True, sharpen_amount=0.9,
+    ),
+    "4K Crisp (2160p)": QualityTemplate(
+        name="4K Crisp (2160p)",
+        target_height=2160, preset="slow", crf=17,
+        sharpen=True, sharpen_amount=1.0,
+    ),
+    "Fast Preview": QualityTemplate(
+        name="Fast Preview",
+        target_height=720, preset="ultrafast", crf=26,
+        sharpen=False, sharpen_amount=0.0,
+        audio_bitrate="128k",
+    ),
+}
+
+
+def apply_quality_template(options: EncodeOptions, template_name: str) -> EncodeOptions:
+    """Return a new EncodeOptions with the named template applied on top.
+
+    Unknown template names return `options` unchanged.
+    """
+    tpl = QUALITY_TEMPLATES.get(template_name)
+    if not tpl:
+        return options
+    return EncodeOptions(
+        watermark=options.watermark,
+        target_height=tpl.target_height if tpl.target_height is not None else options.target_height,
+        video_codec=options.video_codec,
+        crf=tpl.crf,
+        preset=tpl.preset,
+        audio_codec=options.audio_codec,
+        audio_bitrate=tpl.audio_bitrate,
+        sharpen=tpl.sharpen,
+        sharpen_amount=tpl.sharpen_amount,
+        pixel_format=options.pixel_format,
+    )

@@ -7,9 +7,11 @@ from pathlib import Path
 
 from app.utils.file_manager import (
     build_output_path,
+    build_sequential_output_paths,
     filter_video_paths,
     human_size,
     is_video_file,
+    random_code,
     sanitize_filename,
 )
 
@@ -48,6 +50,38 @@ def test_build_output_path_collision(tmp_path: Path) -> None:
     b = build_output_path(str(src), str(out_dir))
     assert a != b
     assert b.endswith("_processed_1.mp4")
+
+
+def test_random_code_length_and_hex() -> None:
+    code = random_code(6)
+    assert len(code) == 6
+    assert all(c in "0123456789abcdef" for c in code)
+
+
+def test_build_sequential_output_paths(tmp_path: Path) -> None:
+    inputs = [f"/src/vid{i}.mp4" for i in range(1, 6)]
+    out_dir = tmp_path / "out"
+    paths = build_sequential_output_paths(inputs, str(out_dir))
+    assert len(paths) == 5
+    names = [os.path.basename(p) for p in paths]
+    # 1-based, zero-padded to len(5)=1, so "1_xxxxxx.mp4" .. "5_xxxxxx.mp4"
+    for i, name in enumerate(names, start=1):
+        assert name.startswith(f"{i}_")
+        assert name.endswith(".mp4")
+    # All unique
+    assert len(set(paths)) == 5
+
+
+def test_build_sequential_output_paths_pads_for_large_batches(tmp_path: Path) -> None:
+    inputs = [f"/src/vid{i}.mp4" for i in range(1, 13)]  # 12 files
+    paths = build_sequential_output_paths(inputs, str(tmp_path))
+    names = [os.path.basename(p) for p in paths]
+    assert names[0].startswith("01_")
+    assert names[-1].startswith("12_")
+
+
+def test_build_sequential_output_paths_empty(tmp_path: Path) -> None:
+    assert build_sequential_output_paths([], str(tmp_path)) == []
 
 
 def test_human_size() -> None:
