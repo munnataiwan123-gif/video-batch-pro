@@ -112,6 +112,41 @@ def test_command_preview_includes_sharpen_when_enabled() -> None:
     assert "scale=-2:1440" in graph
 
 
+def test_bounce_text_uses_triangle_wave() -> None:
+    wm = WatermarkSettings(
+        enabled=True, mode="text", text="Hi",
+        bounce=True, bounce_speed="slow",
+    )
+    _, parts = build_overlay_filtergraph(wm, 1920, 1080)
+    graph = parts[0]
+    assert "abs(mod(t*40" in graph
+    assert "text_w" in graph
+    assert "text_h" in graph
+
+
+def test_bounce_text_speed_fast() -> None:
+    wm = WatermarkSettings(
+        enabled=True, mode="text", text="Hi",
+        bounce=True, bounce_speed="fast",
+    )
+    _, parts = build_overlay_filtergraph(wm, 1920, 1080)
+    assert "abs(mod(t*160" in parts[0]
+
+
+def test_bounce_image_overlay(tmp_path: Path) -> None:
+    img = tmp_path / "logo.png"
+    img.write_bytes(b"\x89PNG\r\n\x1a\n")
+    wm = WatermarkSettings(
+        enabled=True, mode="image", image_path=str(img),
+        bounce=True, bounce_speed="medium",
+    )
+    _, parts = build_overlay_filtergraph(wm, 1920, 1080)
+    # Should contain the bounce expressions against main W/H and overlay w/h.
+    joined = ";".join(parts)
+    assert "W-w" in joined and "H-h" in joined
+    assert "abs(mod(t*90" in joined
+
+
 def test_overlay_disabled_returns_empty() -> None:
     wm = WatermarkSettings(enabled=False)
     extras, parts = build_overlay_filtergraph(wm, 1920, 1080)
@@ -170,6 +205,20 @@ def test_process_video_produces_output(sample_videos, tmp_path: Path) -> None:
     # Output should be scaled up to 480p height.
     out_info = probe_video(str(out))
     assert out_info.height == 480
+
+
+def test_process_video_with_bouncing_text(sample_videos, tmp_path: Path) -> None:
+    """End-to-end: real ffmpeg must accept the bounce expression."""
+    src = sample_videos[0]
+    out = tmp_path / "bounce_text.mp4"
+    info = probe_video(str(src))
+    wm = WatermarkSettings(
+        enabled=True, mode="text", text="BOUNCE",
+        bounce=True, bounce_speed="slow",
+    )
+    opts = EncodeOptions(watermark=wm, preset="ultrafast", crf=28)
+    process_video(str(src), str(out), info, opts)
+    assert out.exists() and out.stat().st_size > 0
 
 
 def test_process_video_with_image_overlay(sample_videos, tmp_path: Path) -> None:

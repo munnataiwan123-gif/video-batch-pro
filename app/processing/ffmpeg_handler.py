@@ -157,6 +157,8 @@ class WatermarkSettings:
     font_color: str = "white"
     font_file: str = ""             # path to a .ttf / .otf file (optional)
     shadow: bool = True             # drop shadow behind text
+    bounce: bool = False            # DVD-screensaver style animation
+    bounce_speed: str = "slow"      # "slow" | "medium" | "fast"
 
 
 def _escape_drawtext(text: str) -> str:
@@ -173,6 +175,43 @@ def _pos_exprs(settings: WatermarkSettings) -> tuple[str, str]:
     if settings.position == "custom":
         return (str(int(settings.custom_x)), str(int(settings.custom_y)))
     return POSITION_EXPRS.get(settings.position, POSITION_EXPRS["bottom-right"])
+
+
+# DVD-screensaver pixels-per-second for each speed preset. We use slightly
+# different X/Y velocities so the overlay doesn't move along a perfect 45°
+# line — looks more natural.
+BOUNCE_SPEEDS: dict[str, tuple[int, int]] = {
+    "slow":   (40, 28),
+    "medium": (90, 63),
+    "fast":   (160, 112),
+}
+
+
+def _bounce_exprs_text(speed: str) -> tuple[str, str]:
+    """Return ffmpeg drawtext x/y expressions for a DVD-style bounce.
+
+    Uses a triangle wave: `abs(mod(t*v, 2*(w-text_w)) - (w-text_w))` oscillates
+    between 0 and (w-text_w). `text_w` / `text_h` are drawtext-specific
+    variables that resolve to the rendered glyph box.
+    """
+    vx, vy = BOUNCE_SPEEDS.get(speed, BOUNCE_SPEEDS["slow"])
+    x = f"abs(mod(t*{vx}\\,2*(w-text_w))-(w-text_w))"
+    y = f"abs(mod(t*{vy}\\,2*(h-text_h))-(h-text_h))"
+    return x, y
+
+
+def _bounce_exprs_overlay(speed: str) -> tuple[str, str]:
+    """Return ffmpeg overlay x/y expressions for a DVD-style image bounce.
+
+    For the overlay filter, main video dimensions are `W`/`H` and the overlay
+    is `w`/`h`. Note: unlike drawtext, overlay expressions use `:` as the arg
+    separator so commas inside `mod()` do NOT need escaping.
+    """
+    vx, vy = BOUNCE_SPEEDS.get(speed, BOUNCE_SPEEDS["slow"])
+    # Escape commas so the filter-graph parser does not split on them.
+    x = f"abs(mod(t*{vx}\\,2*(W-w))-(W-w))"
+    y = f"abs(mod(t*{vy}\\,2*(H-h))-(H-h))"
+    return x, y
 
 
 def _escape_fontfile(path: str) -> str:
@@ -203,6 +242,8 @@ def build_overlay_filtergraph(
     if settings.mode == "image":
         if not settings.image_path or not os.path.isfile(settings.image_path):
             raise FFmpegError(f"Watermark image not found: {settings.image_path!r}")
+        if settings.bounce:
+            x_expr, y_expr = _bounce_exprs_overlay(settings.bounce_speed)
         # Scale overlay relative to main width (10% default * scale multiplier).
         target_w = max(1, int(base_width * 0.1 * settings.scale))
         # -loop 1 keeps the still image alive for the whole video duration;
@@ -227,6 +268,9 @@ def build_overlay_filtergraph(
     font_clause = ""
     if settings.font_file and os.path.isfile(settings.font_file):
         font_clause = f"fontfile='{_escape_fontfile(settings.font_file)}':"
+
+    if settings.bounce:
+        x_expr, y_expr = _bounce_exprs_text(settings.bounce_speed)
 
     # Build drawtext parameters. We pair a semi-transparent box with a
     # drop-shadow for a professional CapCut-style overlay.

@@ -69,7 +69,11 @@ jobs will take more disk space and CPU time.</li>
 <i>font file</i> (any .ttf / .otf — e.g. from <code>C:\\Windows\\Fonts</code>).
 A drop shadow is applied automatically for legibility.</li>
 <li>For image: PNG with transparency gives the cleanest results. The image is
-locked in place for the whole video (no bouncing).</li>
+locked in place for the whole video by default (no unintended flicker).</li>
+<li><b>Bounce watermark (DVD-style)</b>: tick this to make the text or logo
+drift diagonally and bounce off the edges of the video. Pick
+<i>slow / medium / fast</i>. Position / custom X / Y are ignored while
+bounce is on.</li>
 </ul>
 
 <b>3. Pick a quality template</b>
@@ -318,6 +322,22 @@ class MainWindow(QtWidgets.QMainWindow):
         xy_row.addStretch(1)
         l.addLayout(xy_row)
 
+        # Bounce (DVD-screensaver style animation)
+        bounce_row = QtWidgets.QHBoxLayout()
+        self.wm_bounce = QtWidgets.QCheckBox("Bounce watermark (DVD-style)")
+        self.wm_bounce.setToolTip(
+            "Make the watermark drift diagonally and bounce off the edges "
+            "of the video. Works for both text and image logos."
+        )
+        bounce_row.addWidget(self.wm_bounce)
+        bounce_row.addWidget(QtWidgets.QLabel("speed:"))
+        self.wm_bounce_speed = QtWidgets.QComboBox()
+        self.wm_bounce_speed.addItems(["slow", "medium", "fast"])
+        self.wm_bounce_speed.setCurrentText("slow")
+        bounce_row.addWidget(self.wm_bounce_speed)
+        bounce_row.addStretch(1)
+        l.addLayout(bounce_row)
+
         # Opacity + scale + font size
         self.wm_opacity = LabeledSlider("Opacity", 0, 100, 80, suffix="%")
         l.addWidget(self.wm_opacity)
@@ -347,11 +367,17 @@ class MainWindow(QtWidgets.QMainWindow):
         _update_mode()
 
         def _update_custom_xy(_: str = "") -> None:
+            bouncing = self.wm_bounce.isChecked()
             is_custom = self.wm_position.currentText() == "custom"
-            self.wm_x.setEnabled(is_custom)
-            self.wm_y.setEnabled(is_custom)
+            # Bounce overrides manual positioning — disable all placement
+            # controls so the user isn't confused by dead knobs.
+            self.wm_position.setEnabled(not bouncing)
+            self.wm_x.setEnabled(is_custom and not bouncing)
+            self.wm_y.setEnabled(is_custom and not bouncing)
+            self.wm_bounce_speed.setEnabled(bouncing)
 
         self.wm_position.currentTextChanged.connect(_update_custom_xy)
+        self.wm_bounce.stateChanged.connect(lambda _=0: _update_custom_xy())
         _update_custom_xy()
 
         l.addStretch(1)
@@ -751,6 +777,8 @@ class MainWindow(QtWidgets.QMainWindow):
             font_color=self.wm_fontcolor.currentText(),
             font_file=self.wm_font_path.text().strip(),
             shadow=self.wm_shadow.isChecked(),
+            bounce=self.wm_bounce.isChecked(),
+            bounce_speed=self.wm_bounce_speed.currentText(),
         )
 
     def _collect_upscale(self) -> UpscaleOptions:
@@ -769,6 +797,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.wm_image_path.setText(wm.image_path)
         self.wm_font_path.setText(getattr(wm, "font_file", "") or "")
         self.wm_shadow.setChecked(bool(getattr(wm, "shadow", True)))
+        self.wm_bounce.setChecked(bool(getattr(wm, "bounce", False)))
+        bs = str(getattr(wm, "bounce_speed", "slow") or "slow")
+        idx = self.wm_bounce_speed.findText(bs)
+        if idx >= 0:
+            self.wm_bounce_speed.setCurrentIndex(idx)
         if wm.position in POSITIONS:
             self.wm_position.setCurrentText(wm.position)
         self.wm_x.setValue(int(wm.custom_x))
