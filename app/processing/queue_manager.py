@@ -1,11 +1,4 @@
-"""Background worker thread that processes a queue of videos.
-
-The UI adds videos + encode/upscale options and the worker emits Qt signals
-for per-video progress, overall progress, completion, and errors.
-
-We keep this module self-contained so it can be unit-tested without a UI by
-constructing a `BatchWorker` and pumping signals into a mock receiver.
-"""
+"""Background worker thread that processes a queue of videos."""
 
 from __future__ import annotations
 
@@ -24,7 +17,10 @@ from .ffmpeg_handler import (
     probe_video,
 )
 from .upscale_handler import UpscaleOptions
-from ..utils.file_manager import build_output_path
+from ..utils.file_manager import (
+    build_output_path,
+    build_sequential_output_paths,
+)
 
 
 @dataclass
@@ -42,6 +38,7 @@ class BatchJob:
     output_dir: str = ""
     encode_options: EncodeOptions = None  # type: ignore[assignment]
     upscale_options: UpscaleOptions = field(default_factory=UpscaleOptions)
+    sequential_naming: bool = False  # when True: 1_<rand>.mp4, 2_<rand>.mp4, ...
 
 
 class BatchWorker(QtCore.QObject):
@@ -69,12 +66,27 @@ class BatchWorker(QtCore.QObject):
         return self._cancel
 
     # ------------------------------------------------------------------
+    def _plan_output_paths(self) -> list[str]:
+        """Decide output paths up front so the UI can show names during processing."""
+        if self._job.sequential_naming:
+            return build_sequential_output_paths(
+                [it.input_path for it in self._job.items],
+                self._job.output_dir,
+            )
+        return [
+            it.output_path or build_output_path(it.input_path, self._job.output_dir)
+            for it in self._job.items
+        ]
+
+    # ------------------------------------------------------------------
     @QtCore.pyqtSlot()
     def run(self) -> None:
         total = len(self._job.items)
         if total == 0:
             self.batch_finished.emit([])
             return
+
+        planned_outputs = self._plan_output_paths()
 
         outputs: list[str] = []
         for idx, item in enumerate(self._job.items):
@@ -83,29 +95,28 @@ class BatchWorker(QtCore.QObject):
                 continue
 
             item.status = "running"
+            item.output_path = planned_outputs[idx]
             self.item_started.emit(idx)
 
             try:
                 info = item.info or probe_video(item.input_path)
                 item.info = info
 
-                output_path = item.output_path or build_output_path(
-                    item.input_path, self._job.output_dir
-                )
-                item.output_path = output_path
-
                 options = EncodeOptions(
                     watermark=self._job.encode_options.watermark,
                     target_height=(
                         self._job.upscale_options.target_height
                         if self._job.upscale_options.enabled
-                        else None
+                        else self._job.encode_options.target_height
                     ),
                     video_codec=self._job.encode_options.video_codec,
                     crf=self._job.encode_options.crf,
                     preset=self._job.encode_options.preset,
                     audio_codec=self._job.encode_options.audio_codec,
                     audio_bitrate=self._job.encode_options.audio_bitrate,
+                    sharpen=self._job.encode_options.sharpen,
+                    sharpen_amount=self._job.encode_options.sharpen_amount,
+                    pixel_format=self._job.encode_options.pixel_format,
                 )
 
                 def _pcb(pct: float, _idx: int = idx, _total: int = total) -> None:
@@ -114,7 +125,7 @@ class BatchWorker(QtCore.QObject):
 
                 process_video(
                     input_path=item.input_path,
-                    output_path=output_path,
+                    output_path=item.output_path,
                     info=info,
                     options=options,
                     progress_cb=_pcb,
@@ -122,8 +133,8 @@ class BatchWorker(QtCore.QObject):
                 )
 
                 item.status = "done"
-                outputs.append(output_path)
-                self.item_finished.emit(idx, output_path)
+                outputs.append(item.output_path)
+                self.item_finished.emit(idx, item.output_path)
                 self.overall_progress.emit((idx + 1) / total)
 
             except FFmpegError as exc:
